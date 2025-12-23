@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Message, UserProfile, SocialPost, AppSettings, Comment } from './types';
+import { Message, UserProfile, SocialPost, AppSettings, SystemLog } from './types';
 import Header from './components/Header';
 import ChatBubble from './components/ChatBubble';
 import Composer from './components/Composer';
@@ -9,10 +9,27 @@ import AdminDashboard from './components/AdminDashboard';
 import AboutPage from './components/AboutPage';
 import DonationPage from './components/DonationPage';
 import ProfilePage from './components/ProfilePage';
+import VanguardLeaderboard from './components/VanguardLeaderboard';
+import SystemTerminal from './components/SystemTerminal';
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 
-const ADMIN_PIN = String(process.env.ADMIN_PIN || 'GREAT_IFE_ADMIN_2025');
+// FIXED: Now supports both Vite and other environments
+const getEnvVar = (key: string, fallback: string) => {
+  try {
+    // Check Vite env first (import.meta.env)
+    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env[key]) {
+      return String(import.meta.env[key]);
+    }
+    // Then check process.env
+    if (typeof process !== 'undefined' && process.env && process.env[key]) {
+      return String(process.env[key]);
+    }
+  } catch { }
+  return fallback;
+};
 
+// FIXED: Now looks for VITE_ prefix first, then falls back
+const ADMIN_PIN = getEnvVar('VITE_ADMIN_PIN', getEnvVar('ADMIN_PIN', 'GREAT_IFE_ADMIN_2025'));
 const OAU_LOGO = "https://upload.wikimedia.org/wikipedia/en/thumb/2/29/Obafemi_Awolowo_University_logo.png/200px-Obafemi_Awolowo_University_logo.png";
 const NACOS_LOGO = "https://raw.githubusercontent.com/Paradox-Overlord/Assets/main/nacos_logo_white.png";
 
@@ -28,7 +45,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 const App: React.FC = () => {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [profiles, setProfiles] = useState<Record<string, UserProfile>>({});
-  const [view, setView] = useState<'CHAT' | 'SOCIAL' | 'ADMIN' | 'HOME' | 'ABOUT' | 'DONATE' | 'PROFILE'>('HOME');
+  const [view, setView] = useState<'CHAT' | 'SOCIAL' | 'ADMIN' | 'HOME' | 'ABOUT' | 'DONATE' | 'PROFILE' | 'VANGUARD'>('HOME');
   const [selectedProfileAlias, setSelectedProfileAlias] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [posts, setPosts] = useState<SocialPost[]>([]);
@@ -37,10 +54,16 @@ const App: React.FC = () => {
   const [replyTarget, setReplyTarget] = useState<Message | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [seenMessageIds, setSeenMessageIds] = useState<Set<string>>(new Set());
+  const [logs, setLogs] = useState<SystemLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isVerifyingSession, setIsVerifyingSession] = useState(true);
   
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  const addLog = (event: string, type: SystemLog['type'] = 'INFO') => {
+    const newLog: SystemLog = { id: Math.random().toString(36).substr(2, 9), event, type, timestamp: new Date() };
+    setLogs(prev => [...prev, newLog].slice(-50));
+  };
 
   useEffect(() => {
     const verifySavedSession = async () => {
@@ -50,24 +73,14 @@ const App: React.FC = () => {
           const parsed = JSON.parse(savedSession);
           if (parsed && parsed.alias && parsed.password) {
             if (isSupabaseConfigured) {
-              const { data, error } = await supabase
-                .from('profiles')
-                .select('*')
-                .eq('alias', parsed.alias)
-                .single();
-
+              const { data, error } = await supabase.from('profiles').select('*').eq('alias', parsed.alias).single();
               if (!error && data && data.password === parsed.password) {
                 setUser({ ...data, joinedAt: new Date(data.joinedAt) });
-              } else {
-                localStorage.removeItem('anonpro_session');
-              }
-            } else {
-              setUser({ ...parsed, joinedAt: new Date(parsed.joinedAt) });
-            }
+                addLog(`Session restored for @${data.alias}`, 'SECURITY');
+              } else { localStorage.removeItem('anonpro_session'); }
+            } else { setUser({ ...parsed, joinedAt: new Date(parsed.joinedAt) }); }
           }
-        } catch (e) {
-          localStorage.removeItem('anonpro_session');
-        }
+        } catch (e) { localStorage.removeItem('anonpro_session'); }
       }
       setIsVerifyingSession(false);
     };
@@ -76,24 +89,14 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initData = async () => {
-      if (!isSupabaseConfigured) {
-        setIsLoading(false);
-        return;
-      }
-
+      if (!isSupabaseConfigured) { setIsLoading(false); return; }
       try {
-        const [
-          { data: msgData },
-          { data: postData },
-          { data: profileData },
-          { data: settingsData }
-        ] = await Promise.all([
+        const [{ data: msgData }, { data: postData }, { data: profileData }, { data: settingsData }] = await Promise.all([
           supabase.from('messages').select('*').order('timestamp', { ascending: true }),
           supabase.from('posts').select('*').order('timestamp', { ascending: false }),
           supabase.from('profiles').select('*'),
           supabase.from('settings').select('*').single()
         ]);
-
         if (msgData) setMessages(msgData.map(m => ({ ...m, timestamp: new Date(m.timestamp) })));
         if (postData) setPosts(postData.map(p => ({ ...p, timestamp: new Date(p.timestamp) })));
         if (profileData) {
@@ -102,62 +105,32 @@ const App: React.FC = () => {
           setProfiles(profMap);
         }
         if (settingsData) setSettings(settingsData);
-      } catch (e) {
-        console.warn("Uplink failed. Using local state.");
-      } finally {
-        setIsLoading(false);
-      }
+        addLog('Global data state synchronized');
+      } catch (e) { console.warn("Uplink failed."); } finally { setIsLoading(false); }
     };
     initData();
   }, []);
 
   useEffect(() => {
     if (!isSupabaseConfigured || !user) return;
-
-    const messageChannel = supabase.channel('messages-realtime')
-      .on('postgres_changes', { event: 'INSERT', table: 'messages' }, payload => {
+    const messageChannel = supabase.channel('messages-realtime').on('postgres_changes', { event: 'INSERT', table: 'messages' }, payload => {
         const newMessage = { ...payload.new, timestamp: new Date(payload.new.timestamp) } as Message;
         setMessages(prev => [...prev, newMessage]);
-      })
-      .subscribe();
-
-    const settingsChannel = supabase.channel('settings-realtime')
-      .on('postgres_changes', { event: 'UPDATE', table: 'settings' }, payload => {
-        setSettings(payload.new as AppSettings);
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(messageChannel);
-      supabase.removeChannel(settingsChannel);
-    };
+        addLog(`New packet received from @${newMessage.senderAlias}`, 'TRANSMISSION');
+      }).subscribe();
+    return () => { supabase.removeChannel(messageChannel); };
   }, [user]);
 
   const incrementTransmissionCount = async () => {
     if (!user) return;
-    const currentCount = user.totalTransmissions || 0;
-    const newCount = currentCount + 1;
-    
-    // Update local user state
+    const newCount = (user.totalTransmissions || 0) + 1;
     setUser(prev => prev ? { ...prev, totalTransmissions: newCount } : null);
-    
-    // Update global profiles map
-    setProfiles(prev => ({
-      ...prev,
-      [user.alias]: { ...prev[user.alias], totalTransmissions: newCount }
-    }));
-
-    if (isSupabaseConfigured) {
-      await supabase
-        .from('profiles')
-        .update({ totalTransmissions: newCount })
-        .eq('alias', user.alias);
-    }
+    setProfiles(prev => ({ ...prev, [user.alias]: { ...prev[user.alias], totalTransmissions: newCount } }));
+    if (isSupabaseConfigured) { await supabase.from('profiles').update({ totalTransmissions: newCount }).eq('alias', user.alias); }
   };
 
   const handleSendMessage = async (text: string) => {
     if (!user || mutedAliases.includes(user.alias)) return;
-    
     const now = new Date();
     const newMessage: Message = {
       id: Math.random().toString(36).substr(2, 9),
@@ -170,12 +143,8 @@ const App: React.FC = () => {
       ip: `10.0.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
       isFlagged: false
     };
-    
     setMessages(prev => [...prev, newMessage]);
-    if (isSupabaseConfigured) {
-      await supabase.from('messages').insert({ ...newMessage, timestamp: now.toISOString() });
-    }
-    
+    if (isSupabaseConfigured) { await supabase.from('messages').insert({ ...newMessage, timestamp: now.toISOString() }); }
     await incrementTransmissionCount();
     setReplyTarget(null);
   };
@@ -192,40 +161,23 @@ const App: React.FC = () => {
       likes: [],
       comments: []
     };
-
     setPosts(prev => [newPost, ...prev]);
-    if (isSupabaseConfigured) {
-      await supabase.from('posts').insert({ ...newPost, timestamp: now.toISOString() });
-    }
-
+    if (isSupabaseConfigured) { await supabase.from('posts').insert({ ...newPost, timestamp: now.toISOString() }); }
+    addLog(`Social echo generated by @${user.alias}`, 'TRANSMISSION');
     await incrementTransmissionCount();
-  };
-
-  const handleUpdateSettings = async (newSettings: AppSettings) => {
-    setSettings(newSettings);
-    if (isSupabaseConfigured) {
-      const { error } = await supabase.from('settings').upsert(newSettings);
-      if (error) throw error;
-    }
   };
 
   const handleUpdateProfile = async (updates: Partial<UserProfile>) => {
     if (!user) return;
-    const updatedUser = { ...user, ...updates };
-    setUser(updatedUser);
-    
+    setUser(prev => prev ? { ...prev, ...updates } : null);
     setProfiles(prev => ({
       ...prev,
       [user.alias]: { ...prev[user.alias], ...updates }
     }));
-
     if (isSupabaseConfigured) {
-      const { error } = await supabase
-        .from('profiles')
-        .update(updates)
-        .eq('alias', user.alias);
-      if (error) throw error;
+      await supabase.from('profiles').update(updates).eq('alias', user.alias);
     }
+    addLog(`Identity profile updated for @${user.alias}`, 'SECURITY');
   };
 
   const openProfile = (alias: string) => {
@@ -237,7 +189,7 @@ const App: React.FC = () => {
   if (isLoading || isVerifyingSession) return (
     <div className="h-screen w-full bg-slate-950 flex flex-col items-center justify-center gap-6">
       <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
-      <div className="text-slate-500 font-black tracking-widest text-[10px] uppercase">Connecting...</div>
+      <div className="text-slate-500 font-black tracking-widest text-[10px] uppercase">Decrypting Node...</div>
     </div>
   );
 
@@ -248,14 +200,17 @@ const App: React.FC = () => {
       <Header 
         user={user} 
         currentView={view} 
-        onViewChange={(v) => { if(v === 'PROFILE') openProfile(user.alias); else setView(v); }} 
+        onViewChange={(v) => { 
+          if(v === 'PROFILE') openProfile(user.alias); 
+          else setView(v); 
+        }} 
         onSearch={setSearchQuery}
         searchQuery={searchQuery}
         onLogout={() => { setUser(null); localStorage.removeItem('anonpro_session'); setView('HOME'); }}
       />
 
       <main className="flex-1 overflow-y-auto custom-scrollbar">
-        <div className="max-w-4xl mx-auto p-4 md:p-8">
+        <div className="max-w-4xl mx-auto p-4 md:p-8 space-y-12">
           {view === 'HOME' && (
             <div className="flex flex-col items-center justify-center min-h-[70vh] text-center space-y-12 animate-in fade-in duration-1000">
               <div className="flex gap-12 items-center">
@@ -264,11 +219,14 @@ const App: React.FC = () => {
               </div>
               <div className="space-y-4">
                 <h2 className="text-6xl md:text-8xl font-black tracking-tighter text-white uppercase">ANONCHAT <span className="text-blue-500">PRO</span></h2>
-                <p className="text-slate-500 max-w-lg mx-auto text-xl font-medium">The Professional Anonymous Network for the Great Ife Community.</p>
+                <p className="text-slate-500 max-w-lg mx-auto text-xl font-medium">Next-Generation Anonymous Infrastructure for Great Ife.</p>
+              </div>
+              <div className="w-full max-w-2xl">
+                <SystemTerminal logs={logs} />
               </div>
               <div className="flex flex-wrap justify-center gap-6">
                 <button onClick={() => setView('CHAT')} className="bg-blue-600 hover:bg-blue-500 text-white px-10 py-5 rounded-3xl font-black text-lg shadow-2xl transition-all hover:scale-105">ENTER CHATROOM</button>
-                <button onClick={() => setView('SOCIAL')} className="bg-slate-900 border border-slate-800 text-slate-300 px-10 py-5 rounded-3xl font-black text-lg">SOCIAL WALL</button>
+                <button onClick={() => setView('VANGUARD')} className="bg-slate-900 border border-slate-800 text-slate-300 px-10 py-5 rounded-3xl font-black text-lg hover:border-blue-500/50">VIEW VANGUARD</button>
               </div>
             </div>
           )}
@@ -299,6 +257,17 @@ const App: React.FC = () => {
           )}
 
           {view === 'SOCIAL' && <SocialWall posts={posts} user={user} onCreatePost={handleCreatePost} onLike={() => {}} onAddComment={() => {}} onLikeComment={() => {}} onAliasClick={openProfile} />}
+          {view === 'VANGUARD' && <VanguardLeaderboard profiles={Object.values(profiles)} onAliasClick={openProfile} />}
+          {view === 'ABOUT' && <AboutPage />}
+          {view === 'DONATE' && <DonationPage settings={settings} />}
+          {view === 'PROFILE' && selectedProfileAlias && (
+            <ProfilePage 
+              profile={profiles[selectedProfileAlias] || { alias: selectedProfileAlias, role: 'USER', reputation: 10, followers: [], following: [], joinedAt: new Date(), totalLikesReceived: 0, totalTransmissions: 0 }} 
+              viewerAlias={user.alias} onFollow={() => {}} onUpdateProfile={handleUpdateProfile}
+              userPosts={posts.filter(p => p.authorAlias === selectedProfileAlias)}
+              userMessages={messages.filter(m => m.senderAlias === selectedProfileAlias)}
+            />
+          )}
           {view === 'ADMIN' && (
             <AdminDashboard 
               messages={messages} profiles={profiles}
@@ -308,17 +277,7 @@ const App: React.FC = () => {
                 if(isSupabaseConfigured) await supabase.from('messages').update({ isFlagged: !msg?.isFlagged }).eq('id', id);
               }}
               onMute={(a) => setMutedAliases(prev => prev.includes(a) ? prev.filter(x => x !== a) : [...prev, a])}
-              mutedUsers={mutedAliases} settings={settings} onUpdateSettings={handleUpdateSettings}
-            />
-          )}
-          {view === 'ABOUT' && <AboutPage />}
-          {view === 'DONATE' && <DonationPage settings={settings} />}
-          {view === 'PROFILE' && selectedProfileAlias && (
-            <ProfilePage 
-              profile={profiles[selectedProfileAlias] || { alias: selectedProfileAlias, role: 'USER', reputation: 10, followers: [], following: [], joinedAt: new Date(), totalLikesReceived: 0, totalTransmissions: 0 }} 
-              viewerAlias={user.alias} onFollow={() => {}} onUpdateProfile={handleUpdateProfile}
-              userPosts={posts.filter(p => p.authorAlias === selectedProfileAlias)}
-              userMessages={messages.filter(m => m.senderAlias === selectedProfileAlias)}
+              mutedUsers={mutedAliases} settings={settings} onUpdateSettings={async (s) => setSettings(s)}
             />
           )}
         </div>
